@@ -122,6 +122,7 @@ class LightCurve(object):
     def filter_names_to_numbers(self, filt_dict):
         for i, filt in enumerate(self.filters):
             self.filters[i] = filt_dict[filt]
+        self.filters = self.filters.astype(int)
 
     def make_dense_LC(self, nfilts):
         gp_mags = self.abs_mags - self.abs_lim_mag

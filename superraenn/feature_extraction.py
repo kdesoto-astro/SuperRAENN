@@ -1,11 +1,23 @@
 import numpy as np
 from .lc import LightCurve
-from .raenn import prep_input, get_decoder, get_decodings
+from .raenn import (
+    prep_input,
+    get_decoder,
+    get_decodings,
+    customLoss
+)
 import argparse
-from keras.models import model_from_json, Model
+from keras.models import model_from_json, Model, load_model
 from keras.layers import Input
 import datetime
 import os
+
+from tensorflow.config import set_visible_devices
+from tensorflow.config.experimental import list_physical_devices
+
+cpus = list_physical_devices('CPU')
+set_visible_devices([], 'GPU')  # hide the GPU
+set_visible_devices(cpus[0], 'CPU') # unhide potentially hidden CPU
 
 now = datetime.datetime.now()
 date = str(now.strftime("%Y-%m-%d"))
@@ -89,17 +101,20 @@ def feat_from_raenn(data_file, model_base=None,
     - prep file seems unnecessary
     """
     sequence, outseq, ids, maxlen, nfilts = prep_input(data_file, load=True, prep_file=prep_file)
-    model_file = model_base + '.json'
-    model_weight_file = model_base+'.h5'
-    with open(model_file, 'r') as f:
-        model = model_from_json(f.read())
-    model.load_weights(model_weight_file)
+    model_file = model_base+'.h5'
+    model = load_model(
+        model_file,
+        custom_objects={'customLoss': customLoss}
+    )
 
     encodingN = model.layers[2].output_shape[1]
     original_input = Input(shape=(None, nfilts*2+1))
     encoded = model.layers[2]
     encoded1 = model.layers[1]
-    encoder = Model(input=original_input, output=encoded(encoded1(original_input)))
+    encoder = Model(
+        original_input,
+        encoded(encoded1(original_input))
+    )
 
     if plot:
         decoder = get_decoder(model, encodingN)
@@ -108,12 +123,8 @@ def feat_from_raenn(data_file, model_base=None,
         print(lms)
         get_decodings(decoder, encoder, sequence, lms, encodingN, sequence_len)
 
-    encodings = np.zeros((len(ids), encodingN))
-    for i in np.arange(len(ids)):
-        inseq = np.reshape(sequence[i, :, :], (1, maxlen, nfilts*2+1))
-        my_encoding = encoder.predict(inseq)
-        encodings[i, :] = my_encoding
-        encoder.reset_states()
+    encodings = encoder.predict(sequence)
+    #encoder.reset_states()
     return encodings
 
 
@@ -161,11 +172,13 @@ def feat_rise_and_decline(input_lcs, n_mag, nfilts=4):
             trise = np.where((new_times < max_t) & (pred > (max_mag + n_mag)))
             tfall = np.where((new_times > max_t) & (pred > (max_mag + n_mag)))
             if len(trise[0]) == 0:
-                trise = np.max(new_times) - max_t
+                trise = max_t - np.min(new_times)
             else:
                 trise = max_t - new_times[trise][-1]
+            
+            print(trise)
             if len(tfall[0]) == 0:
-                tfall = max_t - np.min(new_times)
+                tfall = np.max(new_times) - max_t
             else:
                 tfall = new_times[tfall][0] - max_t
 

@@ -4,14 +4,16 @@ from keras.models import Model
 from keras.layers import Input, GRU, TimeDistributed
 from keras.layers import Dense, concatenate
 from keras.layers import RepeatVector
-from keras.optimizers import Adam
+from keras.optimizers.legacy import Adam
 import numpy as np
 import matplotlib.pyplot as plt
 import keras.backend as K
-from keras.callbacks import EarlyStopping
+from keras.callbacks import ReduceLROnPlateau, EarlyStopping
 import datetime
 import os
 import logging
+from tensorflow.config import set_visible_devices
+from tensorflow.config.experimental import list_physical_devices
 
 now = datetime.datetime.now()
 date = str(now.strftime("%Y-%m-%d"))
@@ -20,6 +22,9 @@ NEURON_N_DEFAULT = 100
 ENCODING_N_DEFAULT = 10
 N_EPOCH_DEFAULT = 1000
 
+cpus = list_physical_devices('CPU')
+set_visible_devices([], 'GPU')  # hide the GPU
+set_visible_devices(cpus[0], 'CPU') # unhide potentially hidden CPU
 
 def customLoss(yTrue, yPred):
     """
@@ -32,7 +37,7 @@ def customLoss(yTrue, yPred):
     yPred : array
         Predicted flux values
     """
-    return K.mean(K.square(yTrue[:, :, 1:5] - yPred[:, :, :]))
+    return K.mean(K.square(yTrue[:, :, 1:3] - yPred[:, :, :]))
 
 
 def prep_input(input_lc_file, new_t_max=100.0, filler_err=1.0,
@@ -161,17 +166,22 @@ def make_model(LSTMN, encodingN, maxlen, nfilts):
     decoder2 = TimeDistributed(Dense(nfilts, activation='tanh'),
                                input_shape=(None, 1))(decoder1)
 
-    model = Model(input=[input_1, input_2], output=decoder2)
+    model = Model([input_1, input_2], decoder2)
 
-    new_optimizer = Adam(lr=1e-4, beta_1=0.9, beta_2=0.999,
+    new_optimizer = Adam(lr=1e-2, beta_1=0.9, beta_2=0.999,
                          decay=0)
     model.compile(optimizer=new_optimizer, loss=customLoss)
 
-    es = EarlyStopping(monitor='val_loss', min_delta=0, patience=50,
+    reduce_lr = ReduceLROnPlateau(
+        monitor='val_loss', factor=0.8,
+        patience=10, min_lr=1e-4,
+        min_delta=0
+    )
+    es = EarlyStopping(monitor='val_loss', min_delta=0, patience=20,
                        verbose=0, mode='min', baseline=None,
                        restore_best_weights=True)
 
-    callbacks_list = [es]
+    callbacks_list = [reduce_lr]
     return model, callbacks_list, input_1, encoded
 
 
@@ -198,7 +208,7 @@ def fit_model(model, callbacks_list, sequence, outseq, n_epoch):
         Trained keras model
     """
     model.fit([sequence, outseq], sequence, epochs=n_epoch,  verbose=1,
-              shuffle=False, callbacks=callbacks_list, validation_split=0.33)
+              shuffle=True, callbacks=callbacks_list, validation_split=0.10, batch_size=512)
     return model
 
 
@@ -216,7 +226,7 @@ def test_model(sequence_test, model, lms, sequence_len, plot=True):
 
 
 def get_encoder(model, input_1, encoded):
-    encoder = Model(input=input_1, output=encoded)
+    encoder = Model(input_1, encoded)
     return encoder
 
 
@@ -224,35 +234,32 @@ def get_decoder(model, encodingN):
     encoded_input = Input(shape=(None, (encodingN+2)))
     decoder_layer2 = model.layers[-2]
     decoder_layer3 = model.layers[-1]
-    decoder = Model(input=encoded_input, output=decoder_layer3(decoder_layer2(encoded_input)))
+    decoder = Model(encoded_input, decoder_layer3(decoder_layer2(encoded_input)))
     return decoder
 
 
-def get_decodings(decoder, encoder, sequence, lms, encodingN, sequence_len, plot=True):
+def get_decodings(decoder, encoder, sequence, outseq, encodingN, plot=True):
+
+    nfilts = int((sequence.shape[-1] - 1) / 2)
+
+    encoding = encoder.predict(sequence, verbose=0)
+    repeater = RepeatVector(np.shape(outseq)[1])(encoding)
+    decoding_input2 = np.concatenate((repeater, outseq), axis=-1)
+    decoding2 = decoder.predict(decoding_input2)
 
     if plot:
-        for i in np.arange(len(sequence)):
-            seq = np.reshape(sequence[i, :, :], (1, sequence_len, 9))
-            encoding1 = encoder.predict(seq)[-1]
-            encoding1 = np.vstack([encoding1]).reshape((1, 1, encodingN))
-            repeater1 = np.repeat(encoding1, sequence_len, axis=1)
-            out_seq = np.reshape(seq[:, :, 0], (len(seq), sequence_len, 1))
-            lms_test = np.reshape(np.repeat(lms[i], sequence_len), (len(seq), -1))
-            out_seq = np.dstack((out_seq, lms_test))
-
-            decoding_input2 = np.concatenate((repeater1, out_seq), axis=-1)
-
-            decoding2 = decoder.predict(decoding_input2)[0]
-
-            plt.plot(seq[0, :, 0], seq[0, :, 1], 'green', alpha=1.0, linewidth=1)
-            plt.plot(seq[0, :, 0], decoding2[:, 0], 'green', alpha=0.2, linewidth=10)
-            plt.plot(seq[0, :, 0], seq[0, :, 2], 'red', alpha=1.0, linewidth=1)
-            plt.plot(seq[0, :, 0], decoding2[:, 1], 'red', alpha=0.2, linewidth=10)
-            plt.plot(seq[0, :, 0], seq[0, :, 3], 'orange', alpha=1.0, linewidth=1)
-            plt.plot(seq[0, :, 0], decoding2[:, 2], 'orange', alpha=0.2, linewidth=10)
-            plt.plot(seq[0, :, 0], seq[0, :, 4], 'purple', alpha=1.0, linewidth=1)
-            plt.plot(seq[0, :, 0], decoding2[:, 3], 'purple', alpha=0.2, linewidth=10)
+        colors = ['g', 'r']
+        for i in range(min(10, len(sequence))):
+            for f in range(nfilts):
+                plt.plot(outseq[i, :, 0], decoding2[i, :, f], colors[f], alpha=0.2, linewidth=10)
+                plt.plot(sequence[i, :, 0], sequence[i, :, f+1] + sequence[i, :, f+nfilts+1], colors[f], alpha=0.2, linewidth=1, linestyle='dotted')
+                plt.plot(sequence[i, :, 0], sequence[i, :, f+1] - sequence[i, :, f+nfilts+1], colors[f], alpha=0.2, linewidth=1, linestyle='dotted')
+                plt.plot(sequence[i, :, 0], sequence[i, :, f+1], colors[f], alpha=1.0, linewidth=1)
+            plt.xlim((outseq[i,0,0], outseq[i, -1, 0]))
+            plt.ylim((np.min(sequence[i, :20, 1:nfilts+1])-0.2, np.max(sequence[i, :20, 1:nfilts+1])+0.2))
             plt.show()
+
+    return decoding2
 
 
 def save_model(model, encodingN, LSTMN, model_dir='models/', outdir='./'):
@@ -261,6 +268,18 @@ def save_model(model, encodingN, LSTMN, model_dir='models/', outdir='./'):
     if not os.path.exists(model_dir):
         os.makedirs(model_dir)
 
+    fp1 = os.path.join(
+        model_dir,
+        "model_"+date+"_"+str(encodingN)+'_'+str(LSTMN)+".h5"
+    )
+    fp2 = os.path.join(
+        model_dir,
+        "model.h5"
+    )
+    model.save(fp1, overwrite=True)
+    model.save(fp2, overwrite=True)
+    
+    """
     # serialize model to JSON
     model_json = model.to_json()
     with open(model_dir+"model_"+date+"_"+str(encodingN)+'_'+str(LSTMN)+".json", "w") as json_file:
@@ -270,7 +289,8 @@ def save_model(model, encodingN, LSTMN, model_dir='models/', outdir='./'):
     # serialize weights to HDF5
     model.save_weights(model_dir+"model_"+date+"_"+str(encodingN)+'_'+str(LSTMN)+".h5")
     model.save_weights(model_dir+"model.h5")
-
+    """
+    
     logging.info(f'Saved model to {model_dir}')
 
 
@@ -283,15 +303,9 @@ def save_encodings(model, encoder, sequence, ids, INPUT_FILE,
     if not os.path.exists(model_dir):
         os.makedirs(model_dir)
 
-    encodings = np.zeros((N, encodingN))
-    for i in np.arange(N):
-        seq = np.reshape(sequence[i, :, :], (1, sequence_len, 9))
-
-        my_encoding = encoder.predict(seq)
-
-        encodings[i, :] = my_encoding
-        encoder.reset_states()
-
+    encodings = encoder.predict(sequence)
+    encoder.reset_states()
+    
     encoder_sne_file = model_dir+'en_'+date+'_'+str(encodingN)+'_'+str(LSTMN)+'.npz'
     np.savez(encoder_sne_file, encodings=encodings, ids=ids, INPUT_FILE=INPUT_FILE)
     np.savez(model_dir+'en.npz', encodings=encodings, ids=ids, INPUT_FILE=INPUT_FILE)
