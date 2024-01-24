@@ -80,18 +80,22 @@ def prep_input(input_lc_file, new_t_max=100.0, filler_err=1.0,
     sequence_len = np.max(lengths)
     nfilts = np.shape(lightcurves[0].dense_lc)[1]
     nfiltsp1 = nfilts+1
+    nfiltsp2 = nfilts+2
     n_lcs = len(lightcurves)
     # convert from LC format to list of arrays
-    sequence = np.zeros((n_lcs, sequence_len, nfilts*2+1))
+    # sequence = np.zeros((n_lcs, sequence_len, nfilts*2+1))
+    sequence = np.zeros((n_lcs, sequence_len, nfilts*3 + 1))
 
     lms = []
     for i, lightcurve in enumerate(lightcurves):
         sequence[i, 0:lengths[i], 0] = lightcurve.times
-        sequence[i, 0:lengths[i], 1:nfiltsp1] = lightcurve.dense_lc[:, :, 0]
-        sequence[i, 0:lengths[i], nfiltsp1:] = lightcurve.dense_lc[:, :, 1]
+        sequence[i, 0:lengths[i], 1:nfiltsp1] = lightcurve.dense_lc[:, :, 0] # fluxes
+        sequence[i, 0:lengths[i], nfiltsp1:nfiltsp2] = lightcurve.dense_lc[:, :, 1] # flux errors
+        sequence[i, 0:lengths[i], nfiltsp2:] = lightcurve.wavelengths
         sequence[i, lengths[i]:, 0] = np.max(lightcurve.times)+new_t_max
         sequence[i, lengths[i]:, 1:nfiltsp1] = lightcurve.abs_lim_mag
-        sequence[i, lengths[i]:, nfiltsp1:] = filler_err
+        sequence[i, lengths[i]:, nfiltsp1:nfiltsp2] = filler_err
+        sequence[i, lengths[i]:, nfiltsp2:] = lightcurve.wavelengths
         lms.append(lightcurve.abs_lim_mag)
 
     # Flip because who needs negative magnitudes
@@ -101,14 +105,22 @@ def prep_input(input_lc_file, new_t_max=100.0, filler_err=1.0,
         prep_data = np.load(prep_file)
         bandmin = prep_data['bandmin']
         bandmax = prep_data['bandmax']
+        wavemin = prep_data['wavemin']
+        wavemax = prep_data['wavemax']
     else:
         bandmin = np.min(sequence[:, :, 1:nfiltsp1])
         bandmax = np.max(sequence[:, :, 1:nfiltsp1])
+        wavemin = np.min(sequence[:, :, nfiltsp2:])
+        wavemax = np.max(sequence[:, :, nfiltsp2:])
 
+    # Normalize flux values, flux errors, and wavelengths to be between 0 and 1
     sequence[:, :, 1:nfiltsp1] = (sequence[:, :, 1:nfiltsp1] - bandmin) \
         / (bandmax - bandmin)
-    sequence[:, :, nfiltsp1:] = (sequence[:, :, nfiltsp1:]) \
+    sequence[:, :, nfiltsp1:nfiltsp2] = (sequence[:, :, nfiltsp1:nfiltsp2]) \
         / (bandmax - bandmin)
+    sequence[:, :, nfiltsp2:] = (sequence[:, :, nfiltsp2:] - wavemin) \
+        / (wavemax - wavemin)
+
 
     new_lms = np.reshape(np.repeat(lms, sequence_len), (len(lms), -1))
 
@@ -149,7 +161,8 @@ def make_model(LSTMN, encodingN, maxlen, nfilts):
         RAENN encoding layer
     """
 
-    input_1 = Input((None, nfilts*2+1))
+    # input_1 = Input((None, nfilts*2+1))
+    input_1 = Input((None, nfilts*3+1))
     input_2 = Input((maxlen, 2))
 
     encoder1 = GRU(LSTMN, return_sequences=True, activation='tanh', recurrent_activation='hard_sigmoid')(input_1)
