@@ -23,20 +23,6 @@ N_EPOCH_DEFAULT = 1000
 
 # need all of the input object IDs
 
-class SimilarityHelperLayer(Layer):
-    def __init__(self, **kwargs):
-
-        super(SimilarityHelperLayer, self).__init__(**kwargs)
-
-    def call(self, merged):
-
-        merged_i = tf.repeat(tf.expand_dims(merged[:,:,-1:], 0), tf.shape(merged[:,:,-1:])[0], axis=0) # timestamps
-        merged_j = tf.repeat(tf.expand_dims(merged[:,:,:-1], 0), tf.shape(merged[:,:,:-1])[0], axis=0) # latent space vals
-        merged_j = tf.transpose(merged_j, perm=[1,0,2,3])
-
-        merged_ij = tf.concat([merged_j, merged_i], axis=-1)
-
-        return merged_ij
 
 class SimilarityLossLayer(Layer):
     """
@@ -61,11 +47,9 @@ class SimilarityLossLayer(Layer):
 
         super(SimilarityLossLayer, self).__init__(**kwargs)
 
-    def call(self, input1, samples):
+    def call(self, samples, input1):
         # samples is the latent variables
         # input1 is the entire input array (last row is object IDs)
-        #
-        # time_arr = merged[:,:,-1]
         objids = input1[:,:,-1]
 
         # calculate distance in latent space
@@ -87,10 +71,9 @@ class SimilarityLossLayer(Layer):
         # Compute distance between distances?
         L_sim = tf.reduce_mean(tf.math.square(S_ij - objid_dist), axis=-1)
 
-        # do contrastive loss with two matrices (perhaps just the element wise mean)
         self.add_metric(L_sim, "constrastive_loss")
 
-        return merged
+        return samples
 
 
 def customLoss(yTrue, yPred):
@@ -243,6 +226,9 @@ def make_model(LSTMN, encodingN, maxlen, nfilts):
     encoder1 = GRU(LSTMN, return_sequences=True, activation='tanh', recurrent_activation='hard_sigmoid')(input_1)
     encoded = GRU(encodingN, return_sequences=False, activation='tanh',
                   recurrent_activation='hard_sigmoid')(encoder1)
+    # This just outputs the same input, but adds a loss term
+    encoded = SimilarityLossLayer(encoded, input_1)
+
     repeater = RepeatVector(maxlen)(encoded)
     merged = concatenate([repeater, input_2], axis=-1)
     decoder1 = GRU(LSTMN, return_sequences=True, activation='tanh', recurrent_activation='hard_sigmoid')(merged)
